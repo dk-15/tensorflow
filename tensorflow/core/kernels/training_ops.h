@@ -1,4 +1,4 @@
-/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,8 +16,9 @@ limitations under the License.
 #ifndef TENSORFLOW_KERNELS_TRAINING_OPS_H_
 #define TENSORFLOW_KERNELS_TRAINING_OPS_H_
 
-#include "tensorflow/core/framework/tensor_types.h"
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace functor {
@@ -31,6 +32,15 @@ struct ApplyGradientDescent {
   void operator()(const Device& d, typename TTypes<T>::Flat var,
                   typename TTypes<T>::ConstScalar alpha,
                   typename TTypes<T>::ConstFlat delta);
+};
+
+template <typename Device, typename T>
+struct ApplyDelayCompensatedGradientDescent {
+  void operator()(const Device& d, typename TTypes<T>::Flat var,
+                  typename TTypes<T>::ConstScalar alpha,
+                  typename TTypes<T>::ConstFlat delta,
+                  typename TTypes<T>::ConstScalar lambda,
+                  typename TTypes<T>::Flat shadow);
 };
 
 template <typename Device, typename T>
@@ -67,6 +77,17 @@ struct ApplyAdagrad {
   void operator()(const Device& d, typename TTypes<T>::Flat var,
                   typename TTypes<T>::Flat accum,
                   typename TTypes<T>::ConstScalar lr,
+                  typename TTypes<T>::ConstFlat grad);
+};
+
+template <typename Device, typename T>
+struct ApplyAdagradDA {
+  void operator()(const Device& d, typename TTypes<T>::Flat var,
+                  typename TTypes<T>::Flat gradient_accum,
+                  typename TTypes<T>::Flat gradient_squared_accum,
+                  typename TTypes<T>::ConstScalar lr, int64 global_step,
+                  typename TTypes<T>::ConstScalar l1,
+                  typename TTypes<T>::ConstScalar l2,
                   typename TTypes<T>::ConstFlat grad);
 };
 
@@ -111,7 +132,7 @@ struct ApplyAdam {
                   typename TTypes<T>::ConstScalar beta1,
                   typename TTypes<T>::ConstScalar beta2,
                   typename TTypes<T>::ConstScalar epsilon,
-                  typename TTypes<T>::ConstFlat grad);
+                  typename TTypes<T>::ConstFlat grad, bool use_nesterov);
 };
 
 template <typename Device, typename T>
@@ -125,6 +146,17 @@ struct ApplyRMSProp {
                   typename TTypes<T>::ConstFlat grad);
 };
 
+template <typename Device, typename T>
+struct ApplyCenteredRMSProp {
+  void operator()(const Device& d, typename TTypes<T>::Flat var,
+                  typename TTypes<T>::Flat mg, typename TTypes<T>::Flat ms,
+                  typename TTypes<T>::Flat mom,
+                  typename TTypes<T>::ConstScalar lr,
+                  typename TTypes<T>::ConstScalar rho,
+                  typename TTypes<T>::ConstScalar momentum,
+                  typename TTypes<T>::ConstScalar epsilon,
+                  typename TTypes<T>::ConstFlat grad);
+};
 }  // end namespace functor
 }  // end namespace tensorflow
 

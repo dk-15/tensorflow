@@ -23,7 +23,7 @@ from tensorflow.python.ops import io_ops
 from tensorflow.python.training import input as input_ops
 
 
-class ReaderSource(transform.Transform):
+class ReaderSource(transform.TensorFlowTransform):
   """Produces `Tensor`s of keys and values using a `tf.Reader`."""
 
   def __init__(self,
@@ -40,8 +40,8 @@ class ReaderSource(transform.Transform):
     """Initializes a ReaderSource.
 
     Args:
-      reader_cls: A subclass of `tesorflow.ReaderBase` that will be used to read
-        from `work_units`.
+      reader_cls: A subclass of `tensorflow.ReaderBase` that will be used to
+        read from `work_units`.
       work_units: A list that describes the source(s) of data to read.
         Typically, this is a list of filenames.
       reader_kwargs: A dictionary of kwargs to be passed to `reader_cls` when it
@@ -75,43 +75,43 @@ class ReaderSource(transform.Transform):
     self._num_threads = num_threads
     self._seed = seed
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def reader_cls(self):
     return self._reader_cls
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def work_units(self):
     return self._work_units
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def reader_kwargs(self):
     return self._reader_kwargs
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def enqueue_size(self):
     return self._enqueue_size
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def batch_size(self):
     return self._batch_size
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def queue_capacity(self):
     return self._queue_capacity
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def shuffle(self):
     return self._shuffle
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def min_after_dequeue(self):
     return self._min_after_dequeue
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def num_threads(self):
     return self._num_threads
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def seed(self):
     return self._seed
 

@@ -23,7 +23,7 @@ from tensorflow.contrib.learn.python.learn.dataframe import transform
 from tensorflow.python.ops import sparse_ops
 
 
-class Densify(transform.Transform):
+class Densify(transform.TensorFlowTransform):
   """Transforms Sparse to Dense Tensor."""
 
   def __init__(self,
@@ -31,7 +31,7 @@ class Densify(transform.Transform):
     super(Densify, self).__init__()
     self._default_value = default_value
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def default_value(self):
     return self._default_value
 
@@ -62,5 +62,4 @@ class Densify(transform.Transform):
 
      # pylint: disable=not-callable
     return self.return_type(sparse_ops.sparse_to_dense(
-        s.indices, s.shape, s.values, default_value=self.default_value))
-
+        s.indices, s.dense_shape, s.values, default_value=self.default_value))

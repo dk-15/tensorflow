@@ -24,10 +24,12 @@ from abc import abstractmethod
 from abc import abstractproperty
 
 import collections
-import inspect
 
 from .series import Series
 from .series import TransformedSeries
+
+from tensorflow.python.util import tf_inspect
+from tensorflow.python.util.deprecation import deprecated
 
 
 def _make_list_of_series(x):
@@ -86,7 +88,12 @@ def _make_tuple_of_string(x):
                   "got %s" % type(x).__name__)
 
 
+@deprecated("2017-06-15", "contrib/learn/dataframe/** is deprecated.")
 def parameter(func):
+  return _parameter(func)
+
+
+def _parameter(func):
   """Tag functions annotated with `@parameter` for later retrieval.
 
   Note that all `@parameter`s are automatically `@property`s as well.
@@ -109,6 +116,7 @@ class Transform(object):
 
   __metaclass__ = ABCMeta
 
+  @deprecated("2017-06-15", "contrib/learn/dataframe/** is deprecated.")
   def __init__(self):
     self._return_type = None
 
@@ -120,7 +128,7 @@ class Transform(object):
   def parameters(self):
     """A dict of names to values of properties marked with `@parameter`."""
     property_param_names = [name
-                            for name, func in inspect.getmembers(type(self))
+                            for name, func in tf_inspect.getmembers(type(self))
                             if (hasattr(func, "fget") and hasattr(
                                 getattr(func, "fget"), "is_parameter"))]
     return {name: getattr(self, name) for name in property_param_names}
@@ -185,20 +193,15 @@ class Transform(object):
                                                  self.output_names)
     return self._return_type
 
-  def _check_output_tensors(self, output_tensors):
-    """Helper for `build(...)`; verifies the output of `_build_transform`.
+  def __str__(self):
+    return self.name
 
-    Args:
-      output_tensors: value returned by a call to `_build_transform`.
+  def __repr__(self):
+    parameters_sorted = ["%s: %s" % (repr(k), repr(v))
+                         for k, v in sorted(self.parameters().items())]
+    parameters_joined = ", ".join(parameters_sorted)
 
-    Raises:
-      TypeError: `transform_output` is not a list.
-      ValueError: `transform_output` does not match `output_names`.
-    """
-    if not isinstance(output_tensors, self.return_type):
-      raise TypeError(
-          "Expected a NamedTuple of Tensors with elements %s; got %s." %
-          (self.output_names, type(output_tensors).__name__))
+    return "%s({%s})" % (self.name, parameters_joined)
 
   def __call__(self, input_series=None):
     """Apply this `Transform` to the provided `Series`, producing 'Series'.
@@ -217,11 +220,61 @@ class Transform(object):
     if len(input_series) != self.input_valency:
       raise ValueError("Expected %s input Series but received %s." %
                        (self.input_valency, len(input_series)))
-    output_series = [TransformedSeries(input_series, self, output_name)
-                     for output_name in self.output_names]
+    output_series = self._produce_output_series(input_series)
 
     # pylint: disable=not-callable
     return self.return_type(*output_series)
+
+  @abstractmethod
+  def _produce_output_series(self, input_series):
+    """Applies the transformation to the `transform_input`.
+
+    Args:
+      input_series: a list of Series representing the input to
+        the Transform.
+
+    Returns:
+        A list of Series representing the transformed output, in order
+        corresponding to `_output_names`.
+    """
+    raise NotImplementedError()
+
+
+class TensorFlowTransform(Transform):
+  """A function from a list of `Series` to a namedtuple of `Series`.
+
+  Transforms map zero or more Series of a DataFrame to new Series.
+  """
+
+  __metaclass__ = ABCMeta
+
+  def _check_output_tensors(self, output_tensors):
+    """Helper for `build(...)`; verifies the output of `_build_transform`.
+
+    Args:
+      output_tensors: value returned by a call to `_build_transform`.
+
+    Raises:
+      TypeError: `transform_output` is not a list.
+      ValueError: `transform_output` does not match `output_names`.
+    """
+    if not isinstance(output_tensors, self.return_type):
+      raise TypeError(
+          "Expected a NamedTuple of Tensors with elements %s; got %s." %
+          (self.output_names, type(output_tensors).__name__))
+
+  def _produce_output_series(self, input_series=None):
+    """Apply this `Transform` to the provided `Series`, producing `Series`.
+
+    Args:
+      input_series: None, a `Series`, or a list of input `Series`, acting as
+         positional arguments.
+
+    Returns:
+      A namedtuple of the output `Series`.
+    """
+    return [TransformedSeries(input_series, self, output_name)
+            for output_name in self.output_names]
 
   def build_transitive(self, input_series, cache=None, **kwargs):
     """Apply this `Transform` to the provided `Series`, producing 'Tensor's.
@@ -277,13 +330,3 @@ class Transform(object):
         A namedtuple of Tensors representing the transformed output.
     """
     raise NotImplementedError()
-
-  def __str__(self):
-    return self.name
-
-  def __repr__(self):
-    parameters_sorted = ["%s: %s" % (repr(k), repr(v))
-                         for k, v in sorted(self.parameters().items())]
-    parameters_joined = ", ".join(parameters_sorted)
-
-    return "%s({%s})" % (self.name, parameters_joined)

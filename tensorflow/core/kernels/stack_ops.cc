@@ -16,6 +16,7 @@ limitations under the License.
 // See docs in ../ops/data_flow_ops.cc.
 
 #include <limits.h>
+#include <atomic>
 #include <vector>
 
 #include "tensorflow/core/common_runtime/device.h"
@@ -26,7 +27,6 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/lib/core/refcount.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/refcount.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
@@ -40,9 +40,14 @@ namespace tensorflow {
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
+#ifdef TENSORFLOW_USE_SYCL
+typedef Eigen::SyclDevice SYCLDevice;
+#endif // TENSORFLOW_USE_SYCL
 
 class Stack : public ResourceBase {
  public:
+  static std::atomic<int64> stack_counter;
+
   struct TensorAndAllocation {
     Tensor tensor;
     AllocatorAttributes alloc_attrs;
@@ -127,13 +132,16 @@ Status GetStack(OpKernelContext* ctx, Stack** stack) {
   }
   const string& container = Tstack_handle.flat<string>()(0);
   const string& stack_name = Tstack_handle.flat<string>()(1);
-  ResourceMgr* rm = ctx->step_resource_manager();
+  ResourceMgr* rm = ctx->resource_manager();
   if (rm == nullptr) {
-    return errors::Internal("No per-step resource manager.");
+    return errors::Internal("No resource manager.");
   }
-  TF_RETURN_IF_ERROR(rm->Lookup(container, stack_name, stack));
+  TF_RETURN_IF_ERROR(rm->Lookup(ctx->step_container()->name(),
+                                strings::StrCat(container, stack_name), stack));
   return Status::OK();
 }
+
+std::atomic<int64> Stack::stack_counter{0};
 
 // A per-run local stack. The stack uses a "per-step" resource manager which
 // ensures that correct garbage collection on error or successful completion.
@@ -142,7 +150,7 @@ class StackOp : public OpKernel {
   explicit StackOp(OpKernelConstruction* context) : OpKernel(context) {
     OP_REQUIRES_OK(context, context->GetAttr("elem_type", &elem_type_));
     OP_REQUIRES_OK(context, context->GetAttr("stack_name", &stack_name_));
-    if (stack_name_ == "") stack_name_ = name();
+    if (stack_name_.empty()) stack_name_ = name();
   }
 
   void Compute(OpKernelContext* ctx) override {
@@ -153,15 +161,17 @@ class StackOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->allocate_temp(tensorflow::DT_STRING,
                                            tensorflow::TensorShape({2}),
                                            &stack_handle, alloc_attr));
+    auto stack_id = Stack::stack_counter.fetch_add(1);
     auto handle = stack_handle.flat<string>();
     handle(0) = "_stacks";
-    handle(1) = stack_name_;
-    // Store the handle in a container of the per-step RM.
-    ResourceMgr* rm = ctx->step_resource_manager();
-    OP_REQUIRES(ctx, rm != nullptr,
-                errors::Internal("No per-step resource manager."));
+    handle(1) = strings::StrCat(stack_name_, "_", stack_id);
+    // Store the handle in a per-step container.
+    ResourceMgr* rm = ctx->resource_manager();
+    OP_REQUIRES(ctx, rm != nullptr, errors::Internal("No resource manager."));
     Stack* stack = new Stack(elem_type_, stack_handle);
-    OP_REQUIRES_OK(ctx, rm->Create(handle(0), stack_name_, stack));
+    OP_REQUIRES_OK(ctx,
+                   rm->Create(ctx->step_container()->name(),
+                              strings::StrCat(handle(0), handle(1)), stack));
     ctx->set_output_ref(0, stack->mu(), stack->handle());
   }
 
@@ -175,6 +185,10 @@ class StackOp : public OpKernel {
 REGISTER_KERNEL_BUILDER(Name("Stack").Device(DEVICE_CPU), StackOp);
 REGISTER_KERNEL_BUILDER(Name("Stack").Device(DEVICE_GPU).HostMemory("handle"),
                         StackOp);
+#ifdef TENSORFLOW_USE_SYCL
+REGISTER_KERNEL_BUILDER(Name("Stack").Device(DEVICE_SYCL).HostMemory("handle"),
+                        StackOp);
+#endif // TENSORFLOW_USE_SYCL
 
 template <typename Device>
 class StackPushOp : public AsyncOpKernel {
@@ -186,18 +200,13 @@ class StackPushOp : public AsyncOpKernel {
   void ComputeAsync(OpKernelContext* ctx, DoneCallback done) override {
     // Get the stack from the handle.
     Stack* stack = nullptr;
-    Status s = GetStack(ctx, &stack);
-    if (!s.ok()) {
-      ctx->CtxFailureWithWarning(s);
-      done();
-      return;
-    }
+    OP_REQUIRES_OK_ASYNC(ctx, GetStack(ctx, &stack), done);
     core::ScopedUnref unref(stack);
 
     if (ctx->input_dtype(1) != stack->ElemType()) {
-      ctx->CtxFailureWithWarning(
-          errors::InvalidArgument("Must have type ", stack->ElemType(),
-                                  " but got ", ctx->input_dtype(1)));
+      ctx->CtxFailure(errors::InvalidArgument("Must have type ",
+                                              stack->ElemType(), " but got ",
+                                              ctx->input_dtype(1)));
       done();
       return;
     }
@@ -211,7 +220,11 @@ class StackPushOp : public AsyncOpKernel {
     static constexpr int kCopyThreshold = 2048;
     static constexpr double kOccupancy = 0.7;
     if (swap_memory_ && !alloc_attrs.on_host() &&
-        std::is_same<Device, GPUDevice>::value &&
+        ( std::is_same<Device, GPUDevice>::value
+#ifdef TENSORFLOW_USE_SYCL
+          || std::is_same<Device, SYCLDevice>::value
+#endif // TENSORFLOW_USE_SYCL
+        ) &&
         tensor.TotalBytes() > kCopyThreshold && stack->IsUsefulToSwap(tensor)) {
       DeviceContext* device_ctxt = ctx->op_device_context();
       auto device = static_cast<tensorflow::Device*>(ctx->device());
@@ -246,7 +259,7 @@ class StackPushOp : public AsyncOpKernel {
     }
 
     // Execute synchronously if not swapped.
-    OP_REQUIRES_OK(ctx, stack->Push({tensor, alloc_attrs, false}));
+    OP_REQUIRES_OK_ASYNC(ctx, stack->Push({tensor, alloc_attrs, false}), done);
     ctx->set_output(0, tensor);
     done();
   }
@@ -287,6 +300,31 @@ REGISTER_GPU_HOST_KERNEL(bool);
 
 #undef REGISTER_GPU_HOST_KERNEL
 
+#ifdef TENSORFLOW_USE_SYCL
+#define REGISTER_SYCL_KERNEL(type)                        \
+  REGISTER_KERNEL_BUILDER(Name("StackPush")               \
+                              .Device(DEVICE_SYCL)        \
+                              .HostMemory("handle")       \
+                              .TypeConstraint<type>("T"), \
+                          StackPushOp<SYCLDevice>);
+
+TF_CALL_GPU_NUMBER_TYPES(REGISTER_SYCL_KERNEL);
+
+#define REGISTER_SYCL_HOST_KERNEL(type)                   \
+  REGISTER_KERNEL_BUILDER(Name("StackPush")               \
+                              .Device(DEVICE_SYCL)        \
+                              .HostMemory("handle")       \
+                              .HostMemory("elem")         \
+                              .HostMemory("output")       \
+                              .TypeConstraint<type>("T"), \
+                          StackPushOp<SYCLDevice>)
+
+REGISTER_SYCL_HOST_KERNEL(int32);
+REGISTER_SYCL_HOST_KERNEL(bool);
+#undef REGISTER_SYCL_KERNEL
+#undef REGISTER_SYCL_HOST_KERNEL
+#endif // TENSORFLOW_USE_SYCL
+
 class StackPopOp : public AsyncOpKernel {
  public:
   explicit StackPopOp(OpKernelConstruction* context) : AsyncOpKernel(context) {}
@@ -294,23 +332,13 @@ class StackPopOp : public AsyncOpKernel {
   void ComputeAsync(OpKernelContext* ctx, DoneCallback done) override {
     // Get the stack from the handle.
     Stack* stack = nullptr;
-    Status s = GetStack(ctx, &stack);
-    if (!s.ok()) {
-      ctx->CtxFailureWithWarning(s);
-      done();
-      return;
-    }
+    OP_REQUIRES_OK_ASYNC(ctx, GetStack(ctx, &stack), done);
     core::ScopedUnref unref(stack);
 
     // Pop the tensor. Transfer the tensor back to device if it was
     // swapped out to CPU.
     Stack::TensorAndAllocation value;
-    s = stack->Pop(&value);
-    if (!s.ok()) {
-      ctx->CtxFailureWithWarning(s);
-      done();
-      return;
-    }
+    OP_REQUIRES_OK_ASYNC(ctx, stack->Pop(&value), done);
     if (value.swapped_to_cpu) {
       // Asynchronously copy the tensor back from CPU to GPU memory.
       DeviceContext* device_ctxt = ctx->op_device_context();
@@ -367,6 +395,31 @@ REGISTER_GPU_HOST_KERNEL(bool);
 
 #undef REGISTER_GPU_HOST_KERNEL
 
+#ifdef TENSORFLOW_USE_SYCL
+#define REGISTER_SYCL_KERNEL(type)                                \
+  REGISTER_KERNEL_BUILDER(Name("StackPop")                        \
+                              .Device(DEVICE_SYCL)                \
+                              .HostMemory("handle")               \
+                              .TypeConstraint<type>("elem_type"), \
+                          StackPopOp)
+
+TF_CALL_GPU_NUMBER_TYPES(REGISTER_SYCL_KERNEL);
+
+#define REGISTER_SYCL_HOST_KERNEL(type)                           \
+  REGISTER_KERNEL_BUILDER(Name("StackPop")                        \
+                              .Device(DEVICE_SYCL)                \
+                              .HostMemory("handle")               \
+                              .HostMemory("elem")                 \
+                              .TypeConstraint<type>("elem_type"), \
+                          StackPopOp)
+
+REGISTER_SYCL_HOST_KERNEL(int32);
+REGISTER_SYCL_HOST_KERNEL(bool);
+
+#undef REGISTER_SYCL_KERNEL
+#undef REGISTER_SYCL_HOST_KERNEL
+#endif // TENSORFLOW_USE_SYCL
+
 class StackCloseOp : public OpKernel {
  public:
   explicit StackCloseOp(OpKernelConstruction* context) : OpKernel(context) {}
@@ -384,5 +437,8 @@ class StackCloseOp : public OpKernel {
 REGISTER_KERNEL_BUILDER(Name("StackClose").Device(DEVICE_CPU), StackCloseOp);
 REGISTER_KERNEL_BUILDER(
     Name("StackClose").Device(DEVICE_GPU).HostMemory("handle"), StackCloseOp);
-
+#ifdef TENSORFLOW_USE_SYCL
+REGISTER_KERNEL_BUILDER(
+    Name("StackClose").Device(DEVICE_SYCL).HostMemory("handle"), StackCloseOp);
+#endif // TENSORFLOW_USE_SYCL
 }  // namespace tensorflow

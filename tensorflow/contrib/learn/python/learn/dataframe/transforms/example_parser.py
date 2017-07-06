@@ -24,7 +24,7 @@ from tensorflow.contrib.learn.python.learn.dataframe import transform
 from tensorflow.python.ops import parsing_ops
 
 
-class ExampleParser(transform.Transform):
+class ExampleParser(transform.TensorFlowTransform):
   """A Transform that parses serialized `tensorflow.Example` protos."""
 
   def __init__(self, features):
@@ -57,7 +57,7 @@ class ExampleParser(transform.Transform):
   def _output_names(self):
     return list(self._ordered_features.keys())
 
-  @transform.parameter
+  @transform._parameter  # pylint: disable=protected-access
   def feature_definitions(self):
     return self._ordered_features
 

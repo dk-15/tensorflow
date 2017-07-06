@@ -28,10 +28,10 @@ limitations under the License.
 
 namespace tensorflow {
 
-template <class Scalar, bool SupportsBatchOperation>
-class MatrixSolveLsOp : public LinearAlgebraOp<Scalar, SupportsBatchOperation> {
+template <class Scalar>
+class MatrixSolveLsOp : public LinearAlgebraOp<Scalar> {
  public:
-  typedef LinearAlgebraOp<Scalar, SupportsBatchOperation> Base;
+  typedef LinearAlgebraOp<Scalar> Base;
 
   explicit MatrixSolveLsOp(OpKernelConstruction* context) : Base(context) {
     OP_REQUIRES_OK(context, context->GetAttr("fast", &fast_));
@@ -47,7 +47,7 @@ class MatrixSolveLsOp : public LinearAlgebraOp<Scalar, SupportsBatchOperation> {
   // in context->input(2).
   int NumMatrixInputs(const OpKernelContext* context) const final { return 2; }
 
-  virtual void ValidateInputMatrixShapes(
+  void ValidateInputMatrixShapes(
       OpKernelContext* context,
       const TensorShapes& input_matrix_shapes) const final {
     Base::ValidateSolver(context, input_matrix_shapes);
@@ -67,6 +67,8 @@ class MatrixSolveLsOp : public LinearAlgebraOp<Scalar, SupportsBatchOperation> {
     return cost >= static_cast<double>(kint64max) ? kint64max
                                                   : static_cast<int64>(cost);
   }
+
+  bool EnableInputForwarding() const final { return false; }
 
   void ComputeMatrix(OpKernelContext* context, const ConstMatrixMaps& inputs,
                      MatrixMaps* outputs) final {
@@ -103,18 +105,19 @@ class MatrixSolveLsOp : public LinearAlgebraOp<Scalar, SupportsBatchOperation> {
         // using Cholesky decomposition.
         Matrix gramian(cols, cols);
         gramian.template triangularView<Eigen::Lower>() =
-            matrix.transpose() * matrix;
+            matrix.adjoint() * matrix;
         if (l2_regularizer > 0) {
           gramian +=
               (Scalar(l2_regularizer) * Matrix::Ones(cols, 1)).asDiagonal();
         }
-        const Eigen::LLT<Matrix, Eigen::Lower> llt(gramian);
+        const Eigen::LLT<Eigen::Ref<Matrix>, Eigen::Lower> llt(gramian);
         OP_REQUIRES(
             context, llt.info() == Eigen::Success,
             errors::InvalidArgument("Input matrix was rank deficient or "
                                     "ill-conditioned. Try setting fast=False "
                                     "or provide a larger l2_regularizer > 0."));
-        outputs->at(0) = llt.solve(matrix.transpose() * rhs);
+        outputs->at(0).noalias() = matrix.adjoint() * rhs;
+        llt.solveInPlace(outputs->at(0));
       } else {
         // Underdetermined case (rows < cols): Solves the minimum-norm problem
         //   min ||X||_F^2 s.t. A*X = RHS
@@ -123,18 +126,18 @@ class MatrixSolveLsOp : public LinearAlgebraOp<Scalar, SupportsBatchOperation> {
         // using Cholesky decomposition.
         Matrix gramian(rows, rows);
         gramian.template triangularView<Eigen::Lower>() =
-            matrix * matrix.transpose();
+            matrix * matrix.adjoint();
         if (l2_regularizer > 0) {
           gramian +=
               (Scalar(l2_regularizer) * Matrix::Ones(rows, 1)).asDiagonal();
         }
-        const Eigen::LLT<Matrix, Eigen::Lower> llt(gramian);
+        const Eigen::LLT<Eigen::Ref<Matrix>, Eigen::Lower> llt(gramian);
         OP_REQUIRES(
             context, llt.info() == Eigen::Success,
             errors::InvalidArgument("Input matrix was rank deficient or "
                                     "ill-conditioned. Try setting fast=False "
                                     "or provide an l2_regularizer > 0."));
-        outputs->at(0) = matrix.transpose() * llt.solve(rhs);
+        outputs->at(0).noalias() = matrix.adjoint() * llt.solve(rhs);
       }
     } else {
       // Use complete orthogonal decomposition which is backwards stable and
@@ -155,10 +158,9 @@ class MatrixSolveLsOp : public LinearAlgebraOp<Scalar, SupportsBatchOperation> {
   bool fast_;
 };
 
-REGISTER_LINALG_OP("MatrixSolveLs", (MatrixSolveLsOp<float, false>), float);
-REGISTER_LINALG_OP("MatrixSolveLs", (MatrixSolveLsOp<double, false>), double);
-REGISTER_LINALG_OP("BatchMatrixSolveLs", (MatrixSolveLsOp<float, true>), float);
-REGISTER_LINALG_OP("BatchMatrixSolveLs", (MatrixSolveLsOp<double, true>),
-                   double);
+REGISTER_LINALG_OP("MatrixSolveLs", (MatrixSolveLsOp<float>), float);
+REGISTER_LINALG_OP("MatrixSolveLs", (MatrixSolveLsOp<double>), double);
+REGISTER_LINALG_OP("BatchMatrixSolveLs", (MatrixSolveLsOp<float>), float);
+REGISTER_LINALG_OP("BatchMatrixSolveLs", (MatrixSolveLsOp<double>), double);
 
 }  // namespace tensorflow
